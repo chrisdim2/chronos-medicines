@@ -8,8 +8,7 @@ build_medicines.py  —  ΑΥΤΟΜΑΤΗ ανανέωση medicines.json
 Υγείας, κατεβάζει το xlsx, το διαβάζει, και γράφει το medicines.json στη μορφή
 που περιμένει η εφαρμογή.
 
-Τρέχει από GitHub Action (βλ. .github/workflows/update-medicines.yml), οπότε
-δεν χρειάζεται ΚΑΜΙΑ δική σου ενέργεια. Μπορείς όμως να το τρέξεις και τοπικά:
+Τρέχει από GitHub Action (βλ. .github/workflows/update-medicines.yml). Τοπικά:
     pip install requests pandas openpyxl
     python build_medicines.py medicines.json
 """
@@ -20,11 +19,14 @@ import re
 import json
 import unicodedata
 import datetime
+from urllib.parse import urljoin
 import requests
 import pandas as pd
 
 LISTING_URL = "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn"
-# Slug ΜΟΝΟ του πλήρους δελτίου (ΟΧΙ Συμπληρωματικό / Νέων Γενοσήμων / Τριμήνου).
+# Χαρακτηριστικό κομμάτι του slug ΜΟΝΟ του πλήρους δελτίου (ΟΧΙ Συμπληρωματικό /
+# Νέων Γενοσήμων / Τριμήνου). Στη διεύθυνση εμφανίζεται ως "<αριθμός>-deltio-
+# anathewrhmenwn-timwn-farmakwn-...".
 FULL_BULLETIN_SLUG = "deltio-anathewrhmenwn-timwn-farmakwn"
 HEADERS = {"User-Agent": "Mozilla/5.0 (medicines-updater)"}
 
@@ -44,33 +46,38 @@ def norm(s):
     return s.lower().strip()
 
 
+def get_html(url):
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return r.text
+
+
 def find_latest_full_bulletin_url():
-    """Σαρώνει τις πρώτες σελίδες της λίστας και επιστρέφει το URL του άρθρου
-    του νεότερου ΠΛΗΡΟΥΣ δελτίου (η λίστα είναι ήδη νεότερο-πρώτο)."""
+    """Σαρώνει τις πρώτες σελίδες της λίστας (νεότερο-πρώτο) και επιστρέφει το
+    URL του άρθρου του νεότερου ΠΛΗΡΟΥΣ δελτίου."""
+    # ΔΕΝ απαιτεί "/" πριν το slug: στη διεύθυνση προηγείται ο αριθμός άρθρου.
+    pattern = re.compile(r'href="([^"]*' + re.escape(FULL_BULLETIN_SLUG) + r'[^"]*)"')
     for page in range(1, 4):
         url = LISTING_URL if page == 1 else f"{LISTING_URL}?page={page}"
-        html = requests.get(url, headers=HEADERS, timeout=30).text
-        m = re.search(r'href="([^"]*/' + FULL_BULLETIN_SLUG + r'[^"]*)"', html)
+        html = get_html(url)
+        m = pattern.search(html)
         if m:
-            link = m.group(1).replace("&amp;", "&")
-            if link.startswith("/"):
-                link = "https://www.moh.gov.gr" + link
-            return link
+            return urljoin(url, m.group(1).replace("&amp;", "&"))
     sys.exit("Δεν βρέθηκε πλήρες δελτίο («αναθεωρημένων τιμών») στη σελίδα του "
              "Υπουργείου. Ίσως άλλαξε η δομή — στείλε τη σελίδα για προσαρμογή.")
 
 
 def find_xlsx_download_url(article_url):
-    """Στη σελίδα του άρθρου, βρίσκει το link λήψης που είναι .xlsx."""
-    html = requests.get(article_url, headers=HEADERS, timeout=30).text
-    # Σύνδεσμοι λήψης: href="...?fdl=NNN" title="Download: ....xlsx"
-    for m in re.finditer(r'href="([^"]*\?fdl=\d+)"[^>]*title="([^"]*)"', html):
-        href, title = m.group(1), m.group(2)
-        if ".xlsx" in title.lower():
-            href = href.replace("&amp;", "&")
-            if href.startswith("/"):
-                href = "https://www.moh.gov.gr" + href
-            return href
+    """Στη σελίδα του άρθρου, βρίσκει τον σύνδεσμο λήψης που είναι .xlsx. Ψάχνει
+    <a> tags που περιέχουν ΚΑΙ "?fdl=" ΚΑΙ ".xlsx" (σε href ή title), ανεξάρτητα
+    από τη σειρά των attributes."""
+    html = get_html(article_url)
+    for tag in re.findall(r'<a\b[^>]*>', html):
+        low = tag.lower()
+        if "?fdl=" in low and ".xlsx" in low:
+            href_m = re.search(r'href="([^"]+)"', tag)
+            if href_m:
+                return urljoin(article_url, href_m.group(1).replace("&amp;", "&"))
     sys.exit("Δεν βρέθηκε αρχείο .xlsx στη σελίδα του δελτίου.")
 
 
@@ -90,8 +97,8 @@ def find_header(raw):
     original = [("" if pd.isna(x) else str(x)) for x in raw.iloc[best_row].tolist()]
     colmap, colnames = {}, {}
     for key, kws in COLUMN_KEYWORDS.items():
-        for idx, cell in enumerate(header):
-            if any(kw in cell for kw in kws):
+        for idx, cell_ in enumerate(header):
+            if any(kw in cell_ for kw in kws):
                 colmap[key] = idx
                 colnames[key] = original[idx].strip()
                 break
@@ -131,8 +138,9 @@ def main():
     xlsx_url = find_xlsx_download_url(article)
     print("xlsx:", xlsx_url)
 
-    blob = requests.get(xlsx_url, headers=HEADERS, timeout=60).content
-    raw = pd.read_excel(io.BytesIO(blob), header=None, dtype=str)
+    resp = requests.get(xlsx_url, headers=HEADERS, timeout=60)
+    resp.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(resp.content), header=None, dtype=str)
     data, col, colnames = find_header(raw)
     print("Στήλες:", {k: colnames[k] for k in ("id", "name", "atc", "active", "price")})
 
@@ -156,7 +164,7 @@ def main():
 
     if len(meds) < 2000:
         sys.exit(f"ΣΦΑΛΜΑ: μόνο {len(meds)} φάρμακα — μάλλον μερικό/χαλασμένο δελτίο. "
-                 "Δεν γράφτηκε τίποτα (η εφαρμογή αγνοεί έτσι κι αλλιώς μικρά αρχεία).")
+                 "Δεν γράφτηκε τίποτα.")
 
     payload = {"updated_at": datetime.date.today().isoformat(), "medicines": meds}
     with open(out, "w", encoding="utf-8") as f:
