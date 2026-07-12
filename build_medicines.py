@@ -31,8 +31,8 @@ FULL_BULLETIN_SLUG = "deltio-anathewrhmenwn-timwn-farmakwn"
 HEADERS = {"User-Agent": "Mozilla/5.0 (medicines-updater)"}
 
 COLUMN_KEYWORDS = {
-    "id":     ["κωδικ"],                          # "Κωδικός" (ΟΧΙ BARCODE)
-    "name":   ["περιγραφ", "ονομασ", "εμπορικ"],  # "Περιγραφή Προϊόντος"
+    "id":     ["κωδικ"],                                   # "Κωδικός" (ΟΧΙ BARCODE)
+    "name":   ["περιγραφ", "ονομασ", "εμπορικ", "προιον"],  # "Περιγραφή Προϊόντος" / "Προϊόν"
     "atc":    ["atc"],
     "active": ["δραστ"],                          # "Δραστική/ές"
     "price":  ["λιανικ"],                         # "Λιανική Τιμή"
@@ -55,8 +55,11 @@ def get_html(url):
 def find_latest_full_bulletin_url():
     """Σαρώνει τις πρώτες σελίδες της λίστας (νεότερο-πρώτο) και επιστρέφει το
     URL του άρθρου του νεότερου ΠΛΗΡΟΥΣ δελτίου."""
-    # ΔΕΝ απαιτεί "/" πριν το slug: στη διεύθυνση προηγείται ο αριθμός άρθρου.
-    pattern = re.compile(r'href="([^"]*' + re.escape(FULL_BULLETIN_SLUG) + r'[^"]*)"')
+    # Απαιτεί το slug ΑΜΕΣΩΣ μετά τον αριθμό άρθρου: "/<αριθμός>-deltio-
+    # anathewrhmenwn-...". Έτσι αποκλείονται άρθρα «Τροποποίηση/Ορθή Επανάληψη»
+    # που απλώς ΑΝΑΦΕΡΟΥΝ το δελτίο στον τίτλο τους (slug "...-laquo-tropopoihsh-
+    # ...-deltio-anathewrhmenwn-...") και δεν είναι το ίδιο το πλήρες δελτίο.
+    pattern = re.compile(r'href="([^"]*/\d+-' + re.escape(FULL_BULLETIN_SLUG) + r'[^"]*)"')
     for page in range(1, 4):
         url = LISTING_URL if page == 1 else f"{LISTING_URL}?page={page}"
         html = get_html(url)
