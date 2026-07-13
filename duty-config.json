@@ -1,0 +1,7 @@
+{
+  "pharmacyAtticaURL": "https://fsa-efimeries.gr/Home/FilteredHomeResults",
+  "pharmacyStandardTemplate": "https://{subdomain}.efhmeries.gr",
+  "pharmacyPatraURL": "https://www.efimeria.gr/",
+  "hospitalAtticaListingURL": "https://www.moh.gov.gr/articles/citizen/efhmeries-nosokomeiwn/68-efhmeries-nosokomeiwn-attikhs",
+  "hospitalThessalonikiURL": "https://www.4ype.gr/efimeries-nosokomeion/"
+}
