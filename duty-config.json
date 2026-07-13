@@ -3,5 +3,11 @@
   "pharmacyStandardTemplate": "https://{subdomain}.efhmeries.gr",
   "pharmacyPatraURL": "https://www.efimeria.gr/",
   "hospitalAtticaListingURL": "https://www.moh.gov.gr/articles/citizen/efhmeries-nosokomeiwn/68-efhmeries-nosokomeiwn-attikhs",
-  "hospitalThessalonikiURL": "https://www.4ype.gr/efimeries-nosokomeion/"
+  "hospitalThessalonikiURL": "https://www.4ype.gr/efimeries-nosokomeion/",
+  "hospitalCreteBaseURL": "http://84.205.229.15/efimeries/interface/plirofories_efimerionPolitis.aspx",
+  "achaiaDutyWeekdays": {
+    "pgnp": [2, 4, 6, 7],
+    "agios_andreas": [3, 5, 1],
+    "karamandaneio": [3, 5, 1]
+  }
 }
