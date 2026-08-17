@@ -11,12 +11,32 @@ build_medicines.py  —  ΑΥΤΟΜΑΤΗ ανανέωση medicines.json
 Τρέχει από GitHub Action (βλ. .github/workflows/update-medicines.yml). Τοπικά:
     pip install requests pandas openpyxl
     python build_medicines.py medicines.json
+
+------------------------------------------------------------------------------
+ΔΥΟ ΕΙΔΗ ΑΠΟΤΥΧΙΑΣ, ΚΑΙ ΓΙΑΤΙ ΔΕΝ ΕΙΝΑΙ ΤΟ ΙΔΙΟ ΠΡΑΓΜΑ
+
+1. «Η ΠΗΓΗ ΕΙΝΑΙ ΠΡΟΣΩΡΙΝΑ ΚΑΤΩ» (503, 502, timeout, μπλοκάρισμα IP).
+   ΔΕΝ φταίει τίποτα δικό μας και δεν υπάρχει τίποτα να διορθώσουμε. Το script
+   τελειώνει με exit 0, δεν γράφει τίποτα, η ροή βγαίνει ΠΡΑΣΙΝΗ και δεν
+   στέλνεται email. Την επόμενη Δευτέρα ξαναδοκιμάζει.
+
+   Πριν, αυτό έριχνε τη ροή με exit 1 και έστελνε email αποτυχίας για κάτι που
+   ο παραλήπτης δεν μπορούσε να διορθώσει.
+
+2. «ΑΛΛΑΞΕ Η ΔΟΜΗ ΤΗΣ ΠΗΓΗΣ» (δεν βρέθηκε δελτίο, δεν βρέθηκε xlsx, λείπουν
+   στήλες, ελάχιστα φάρμακα). ΑΥΤΟ θέλει άνθρωπο. Τελειώνει με exit 1 και
+   στέλνεται email, όπως πρέπει.
+
+Έτσι, ένα κόκκινο Χ σημαίνει πάντα «χρειάζομαι εσένα», ποτέ «το moh.gov.gr
+είχε κακή μέρα».
+------------------------------------------------------------------------------
 """
 
 import sys
 import io
 import re
 import json
+import time
 import unicodedata
 import datetime
 from urllib.parse import urljoin
@@ -28,7 +48,25 @@ LISTING_URL = "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn"
 # Νέων Γενοσήμων / Τριμήνου). Στη διεύθυνση εμφανίζεται ως "<αριθμός>-deltio-
 # anathewrhmenwn-timwn-farmakwn-...".
 FULL_BULLETIN_SLUG = "deltio-anathewrhmenwn-timwn-farmakwn"
-HEADERS = {"User-Agent": "Mozilla/5.0 (medicines-updater)"}
+
+# ΓΙΑΤΙ ΚΑΝΟΝΙΚΟΣ USER-AGENT ΦΥΛΛΟΜΕΤΡΗΤΗ: ο προηγούμενος έγραφε ρητά
+# «medicines-updater», δηλαδή αυτοσυστηνόταν ως script. Τα τείχη προστασίας
+# κρατικών ιστότοπων κόβουν τέτοια κεφαλίδα, και μαζί κόβουν συχνά και ολόκληρα
+# εύρη IP των GitHub Actions. Τα Accept/Accept-Language υπάρχουν για τον ίδιο
+# λόγο: ένα αίτημα χωρίς αυτά ξεχωρίζει αμέσως από αίτημα φυλλομετρητή.
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "el-GR,el;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive",
+}
+
+# Κωδικοί που σημαίνουν «ξαναδοκίμασε», όχι «κάτι έσπασε».
+TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
+RETRIES = 4
+RETRY_SLEEP = 6          # δευτερόλεπτα, πολλαπλασιάζεται σε κάθε προσπάθεια
 
 COLUMN_KEYWORDS = {
     "id":     ["κωδικ"],                                   # "Κωδικός" (ΟΧΙ BARCODE)
@@ -46,9 +84,56 @@ def norm(s):
     return s.lower().strip()
 
 
+def source_unavailable(reason):
+    """Έξοδος ΧΩΡΙΣ σφάλμα: η πηγή δεν απαντά, δεν φταίει τίποτα δικό μας.
+
+    Το exit 0 είναι σκόπιμο. Κρατά τη ροή πράσινη ώστε τα emails αποτυχίας να
+    σημαίνουν πάντα κάτι που χρειάζεται άνθρωπο.
+    """
+    print(f"[ΠΑΡΑΛΕΙΨΗ] {reason}")
+    print("Το medicines.json ΔΕΝ πειράχτηκε. Θα ξαναδοκιμάσει στον επόμενο κύκλο.")
+    sys.exit(0)
+
+
+def structure_changed(reason):
+    """Έξοδος ΜΕ σφάλμα: η πηγή απάντησε, αλλά δεν είναι πια αυτό που περιμέναμε.
+    Αυτό θέλει χειροκίνητη προσαρμογή, οπότε πρέπει να φανεί."""
+    print(f"[ΣΦΑΛΜΑ] {reason}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fetch(url, timeout=30):
+    """GET με επαναλήψεις στα προσωρινά σφάλματα. Επιστρέφει το response.
+
+    Δεν κάνει raise_for_status εδώ: ο καλών αποφασίζει αν ένα 404 σημαίνει
+    «άλλαξε η δομή» ή κάτι άλλο.
+    """
+    last = None
+    for attempt in range(RETRIES):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+        except requests.RequestException as e:
+            last = f"σφάλμα δικτύου ({e.__class__.__name__})"
+        else:
+            if r.status_code not in TRANSIENT_STATUS:
+                return r
+            last = f"HTTP {r.status_code}"
+
+        if attempt < RETRIES - 1:
+            wait = RETRY_SLEEP * (attempt + 1)
+            print(f"  {last}, νέα προσπάθεια σε {wait}s "
+                  f"({attempt + 2} από {RETRIES})…")
+            time.sleep(wait)
+
+    source_unavailable(f"Η πηγή δεν απάντησε μετά από {RETRIES} προσπάθειες "
+                       f"({last}), {url}")
+
+
 def get_html(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
+    r = fetch(url)
+    if r.status_code >= 400:
+        structure_changed(f"HTTP {r.status_code} στο {url}. "
+                          f"Η διεύθυνση μάλλον άλλαξε.")
     return r.text
 
 
@@ -66,8 +151,8 @@ def find_latest_full_bulletin_url():
         m = pattern.search(html)
         if m:
             return urljoin(url, m.group(1).replace("&amp;", "&"))
-    sys.exit("Δεν βρέθηκε πλήρες δελτίο («αναθεωρημένων τιμών») στη σελίδα του "
-             "Υπουργείου. Ίσως άλλαξε η δομή — στείλε τη σελίδα για προσαρμογή.")
+    structure_changed("Δεν βρέθηκε πλήρες δελτίο («αναθεωρημένων τιμών») στη "
+                      "σελίδα του Υπουργείου. Ίσως άλλαξε η δομή ή το slug.")
 
 
 def find_xlsx_download_url(article_url):
@@ -81,7 +166,7 @@ def find_xlsx_download_url(article_url):
             href_m = re.search(r'href="([^"]+)"', tag)
             if href_m:
                 return urljoin(article_url, href_m.group(1).replace("&amp;", "&"))
-    sys.exit("Δεν βρέθηκε αρχείο .xlsx στη σελίδα του δελτίου.")
+    structure_changed("Δεν βρέθηκε αρχείο .xlsx στη σελίδα του δελτίου.")
 
 
 def find_header(raw):
@@ -95,7 +180,8 @@ def find_header(raw):
         if score > best_score:
             best_score, best_row = score, i
     if best_row is None or best_score < 3:
-        sys.exit("ΛΕΙΠΟΥΝ αναμενόμενες στήλες — το Υπουργείο ίσως άλλαξε τη δομή.")
+        structure_changed("ΛΕΙΠΟΥΝ αναμενόμενες στήλες — το Υπουργείο ίσως "
+                          "άλλαξε τη δομή του Excel.")
     header = [norm(x) for x in raw.iloc[best_row].tolist()]
     original = [("" if pd.isna(x) else str(x)) for x in raw.iloc[best_row].tolist()]
     colmap, colnames = {}, {}
@@ -107,7 +193,8 @@ def find_header(raw):
                 break
     missing = [k for k in COLUMN_KEYWORDS if k not in colmap]
     if missing:
-        sys.exit(f"ΛΕΙΠΟΥΝ αναμενόμενες στήλες: {missing}. Κεφαλίδα: {[c for c in original if c]}")
+        structure_changed(f"ΛΕΙΠΟΥΝ αναμενόμενες στήλες: {missing}. "
+                          f"Κεφαλίδα: {[c for c in original if c]}")
     return raw.iloc[best_row + 1:].reset_index(drop=True), colmap, colnames
 
 
@@ -141,8 +228,13 @@ def main():
     xlsx_url = find_xlsx_download_url(article)
     print("xlsx:", xlsx_url)
 
-    resp = requests.get(xlsx_url, headers=HEADERS, timeout=60)
-    resp.raise_for_status()
+    # Το xlsx είναι πολλών megabyte, οπότε πιο γενναιόδωρο timeout. Οι ίδιες
+    # επαναλήψεις ισχύουν και εδώ: μια διακοπή στη μέση του κατεβάσματος δεν
+    # είναι λόγος να πέσει η ροή.
+    resp = fetch(xlsx_url, timeout=120)
+    if resp.status_code >= 400:
+        structure_changed(f"HTTP {resp.status_code} στο κατέβασμα του xlsx.")
+
     raw = pd.read_excel(io.BytesIO(resp.content), header=None, dtype=str)
     data, col, colnames = find_header(raw)
     print("Στήλες:", {k: colnames[k] for k in ("id", "name", "atc", "active", "price")})
@@ -166,8 +258,8 @@ def main():
         })
 
     if len(meds) < 2000:
-        sys.exit(f"ΣΦΑΛΜΑ: μόνο {len(meds)} φάρμακα — μάλλον μερικό/χαλασμένο δελτίο. "
-                 "Δεν γράφτηκε τίποτα.")
+        structure_changed(f"Μόνο {len(meds)} φάρμακα — μάλλον μερικό ή χαλασμένο "
+                          f"δελτίο. Δεν γράφτηκε τίποτα.")
 
     payload = {"updated_at": datetime.date.today().isoformat(), "medicines": meds}
     with open(out, "w", encoding="utf-8") as f:
