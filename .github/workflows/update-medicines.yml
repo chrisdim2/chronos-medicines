@@ -31,6 +31,30 @@ jobs:
       - name: Εγκατάσταση βιβλιοθηκών
         run: pip install requests pandas openpyxl
 
+      # ΠΡΟΣΩΡΙΝΟ (26/10/2026): το moh.gov.gr δίνει 421 στα runners ενώ από Mac δίνει 200.
+      # Τυπώνει τι απαντά η πηγή (κεφαλίδες, αρχή σώματος) με τις κεφαλίδες του script,
+      # χωρίς το Connection, και με curl (HTTP/2 και HTTP/1.1). Σβήνεται μόλις βρεθεί η αιτία.
+      - name: Διάγνωση 421 (προσωρινό)
+        continue-on-error: true
+        run: |
+          python - <<'EOF'
+          import requests
+          from build_medicines import HEADERS, LISTING_URL
+          lean = {k: v for k, v in HEADERS.items() if k != "Connection"}
+          for label, h in (("κεφαλίδες script", HEADERS), ("χωρίς Connection", lean), ("χωρίς κεφαλίδες", None)):
+              try:
+                  r = requests.get(LISTING_URL, headers=h, timeout=30)
+                  print(f"== requests, {label}: HTTP {r.status_code} {r.reason}")
+                  print(dict(r.headers))
+                  print(r.text[:500].replace("\n", " "))
+              except Exception as e:
+                  print(f"== requests, {label}: {e!r}")
+          EOF
+          for v in "" "--http1.1"; do
+            echo "== curl $v"
+            curl -s $v -m 30 -o /dev/null -D - -A "Mozilla/5.0" "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn" | head -15
+          done
+
       - name: Δημιουργία medicines.json
         run: python build_medicines.py medicines.json
 
