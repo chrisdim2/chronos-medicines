@@ -54,6 +54,13 @@ jobs:
             echo "== curl $v"
             curl -s $v -m 30 -o /dev/null -D - -A "Mozilla/5.0" "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn" | head -15
           done
+          # DNS όπως το βλέπει το runner, και δοκιμή με την IP που δίνει 200 από Mac (31.22.118.30).
+          echo "== DNS runner: www.moh.gov.gr"
+          getent ahosts www.moh.gov.gr | awk '{print $1}' | sort -u
+          echo "== curl χωρίς --resolve: IP που συνδέθηκε"
+          curl -s -m 30 -o /dev/null -A "Mozilla/5.0" -w "HTTP %{http_code} remote_ip=%{remote_ip}\n" "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn"
+          echo "== curl --resolve στην 31.22.118.30"
+          curl -s -m 30 -o /dev/null -A "Mozilla/5.0" --resolve www.moh.gov.gr:443:31.22.118.30 -w "HTTP %{http_code} remote_ip=%{remote_ip}\n" "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn"
 
       - name: Δημιουργία medicines.json
         run: python build_medicines.py medicines.json
