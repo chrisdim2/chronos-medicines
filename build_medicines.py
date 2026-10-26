@@ -39,8 +39,10 @@ import json
 import time
 import unicodedata
 import datetime
-from urllib.parse import urljoin
+from contextlib import contextmanager
+from urllib.parse import urljoin, urlparse
 import requests
+from urllib3.util import connection as urllib3_connection
 import pandas as pd
 
 LISTING_URL = "https://www.moh.gov.gr/articles/times-farmakwn/deltia-timwn"
@@ -64,9 +66,20 @@ HEADERS = {
 }
 
 # Κωδικοί που σημαίνουν «ξαναδοκίμασε», όχι «κάτι έσπασε».
-# Τα 403 και 421 είναι το CDN/τείχος προστασίας του moh.gov.gr που κόβει IP των
-# GitHub Actions (26/10/2026: HTTP 421 ενώ η ίδια διεύθυνση απαντούσε 200 αλλού).
+# Το 403 είναι το τείχος προστασίας του moh.gov.gr που μπορεί να κόψει IP των
+# GitHub Actions. Το 421 έχει εξηγηθεί (βλ. PINNED_IPS)· μένει εδώ για την
+# περίπτωση που ούτε η εφεδρική IP απαντά.
 TRANSIENT_STATUS = {403, 408, 421, 425, 429, 500, 502, 503, 504}
+
+# ΕΦΕΔΡΙΚΗ IP (26/10/2026): το www.moh.gov.gr έχει DNS ανά τοποθεσία (CNAME
+# geo.moh.gov.gr). Τα runners του GitHub παίρνουν την 109.169.44.140, έναν server
+# που ξέρει μόνο το moh.gov.gr και απαντά HTTP 421 «Misdirected Request» (το host
+# name δεν ταιριάζει με το SNI) στο www. Η 31.22.118.30 (αυτή που δίνει το DNS
+# στην Ελλάδα) απαντά 200 και από τα runners. Όταν δοθεί 421, ξαναδοκιμάζουμε με
+# σύνδεση σε αυτή την IP, κρατώντας όνομα (SNI), Host και έλεγχο πιστοποιητικού.
+# Αν η IP αλλάξει, το script πέφτει στο [ΠΑΡΑΛΕΙΨΗ] όπως πριν: ελέγξτε με
+#   dig +short www.moh.gov.gr
+PINNED_IPS = {"www.moh.gov.gr": "31.22.118.30"}
 RETRIES = 4
 RETRY_SLEEP = 6          # δευτερόλεπτα, πολλαπλασιάζεται σε κάθε προσπάθεια
 
@@ -104,16 +117,53 @@ def structure_changed(reason):
     sys.exit(1)
 
 
+@contextmanager
+def pinned_ip(host, ip):
+    """Μέσα στο with, οι συνδέσεις στο `host` πάνε στην `ip`.
+
+    Αλλάζει μόνο τη διεύθυνση της σύνδεσης: το requests συνεχίζει να στέλνει το
+    όνομα ως SNI και Host, και το πιστοποιητικό ελέγχεται κανονικά για το όνομα.
+    """
+    real = urllib3_connection.create_connection
+
+    def create_connection(address, *args, **kwargs):
+        name, port = address
+        return real((ip, port) if name == host else address, *args, **kwargs)
+
+    urllib3_connection.create_connection = create_connection
+    try:
+        yield
+    finally:
+        urllib3_connection.create_connection = real
+
+
+def get_once(url, timeout, pin):
+    """Ένα GET. Με `pin`, συνδέεται στην εφεδρική IP του host (αν υπάρχει)."""
+    host = urlparse(url).hostname
+    if pin and host in PINNED_IPS:
+        with pinned_ip(host, PINNED_IPS[host]):
+            return requests.get(url, headers=HEADERS, timeout=timeout)
+    return requests.get(url, headers=HEADERS, timeout=timeout)
+
+
 def fetch(url, timeout=30):
     """GET με επαναλήψεις στα προσωρινά σφάλματα. Επιστρέφει το response.
 
     Δεν κάνει raise_for_status εδώ: ο καλών αποφασίζει αν ένα 404 σημαίνει
-    «άλλαξε η δομή» ή κάτι άλλο.
+    «άλλαξε η δομή» ή κάτι άλλο. Σε 421 από host με εφεδρική IP (PINNED_IPS)
+    ξαναδοκιμάζει αμέσως εκεί, και συνεχίζει με αυτήν στις επόμενες προσπάθειες.
     """
+    host = urlparse(url).hostname
+    pin = False
     last = None
     for attempt in range(RETRIES):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            r = get_once(url, timeout, pin)
+            if r.status_code == 421 and not pin and host in PINNED_IPS:
+                print(f"  HTTP 421 από {host}, δοκιμή στην εφεδρική IP "
+                      f"{PINNED_IPS[host]}…")
+                pin = True
+                r = get_once(url, timeout, pin)
         except requests.RequestException as e:
             last = f"σφάλμα δικτύου ({e.__class__.__name__})"
         else:
